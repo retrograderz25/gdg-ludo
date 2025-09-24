@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import '../../../../core/providers/supabase_provider.dart';
 import '../providers/game_provider.dart';
 import '../utils/board_mapper.dart';
+
+// Provider để lưu danh sách ID của các quân cờ có thể di chuyển
+// (Lưu ý: Provider này nên được đặt trong game_provider.dart,
+// nhưng để ở đây để file này có thể chạy độc lập)
+final validMovesProvider = StateProvider<List<String>>((ref) => []);
 
 // Provider để lấy thông tin của người chơi hiện tại (chỉ một lần)
 final myPlayerInfoProvider = FutureProvider.autoDispose
@@ -11,9 +17,10 @@ final myPlayerInfoProvider = FutureProvider.autoDispose
       final userId = client.auth.currentUser?.id;
       if (userId == null) return null;
 
+      // --- CẢI TIẾN: Lấy cả ID của người chơi và màu sắc ---
       return client
           .from('players')
-          .select('color')
+          .select('id, color') // Lấy cả 'id' (Player ID) và 'color'
           .eq('user_id', userId)
           .eq('room_id', roomId)
           .single()
@@ -29,7 +36,7 @@ class GameScreen extends ConsumerWidget {
     final gameState = ref.watch(gameStateStreamProvider(roomId));
     final pieces = ref.watch(piecesStreamProvider(roomId));
     final myPlayerInfo = ref.watch(myPlayerInfoProvider(roomId));
-    final myUserId = ref.watch(supabaseClientProvider).auth.currentUser?.id;
+    // Không cần myUserId nữa vì chúng ta sẽ dùng myPlayerId
     final validMoves = ref.watch(validMovesProvider);
 
     // Xử lý logic di chuyển quân cờ
@@ -43,24 +50,33 @@ class GameScreen extends ConsumerWidget {
             );
         ref.read(validMovesProvider.notifier).state = [];
       } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Lỗi: ${e.toString()}')),
-        );
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Lỗi: ${e.toString()}')),
+          );
+        }
       }
     }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Ván Cờ Bắt Đầu!'),
+        automaticallyImplyLeading: false, // Vô hiệu hóa nút back
       ),
       body: gameState.when(
         data: (state) {
           if (state.isEmpty) {
             return const Center(child: Text('Đang chờ trạng thái game...'));
           }
+
           final currentTurnPlayerId = state['current_turn_player_id'];
-          final isMyTurn = currentTurnPlayerId == myUserId;
           final diceRoll = state['last_dice_roll'];
+
+          // --- SỬA LỖI LOGIC NGHIÊM TRỌNG ---
+          // So sánh Player ID với Player ID, không phải Auth ID
+          final myPlayerId = myPlayerInfo.value?['id'];
+          final isMyTurn =
+              (myPlayerId != null) && (currentTurnPlayerId == myPlayerId);
 
           return Column(
             children: [
@@ -71,7 +87,13 @@ class GameScreen extends ConsumerWidget {
                   children: [
                     Text(
                       isMyTurn ? 'ĐẾN LƯỢT BẠN!' : 'Đang chờ đối thủ...',
-                      style: Theme.of(context).textTheme.headlineSmall,
+                      style: Theme.of(context).textTheme.headlineSmall
+                          ?.copyWith(
+                            color: isMyTurn
+                                ? Colors.blueAccent
+                                : Colors.black54,
+                            fontWeight: FontWeight.bold,
+                          ),
                     ),
                     const SizedBox(height: 10),
                     if (diceRoll != null)
@@ -84,7 +106,7 @@ class GameScreen extends ConsumerWidget {
               ),
 
               // ---- NÚT TUNG XÚC XẮC ----
-              if (isMyTurn && diceRoll == null) // Chỉ hiện nút khi chưa tung
+              if (isMyTurn && diceRoll == null)
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16.0),
                   child: ElevatedButton(
@@ -96,13 +118,16 @@ class GameScreen extends ConsumerWidget {
                               'roll_dice',
                               params: {'p_room_id': roomId},
                             );
-                        // Cập nhật StateProvider với danh sách các quân cờ có thể đi
                         final moves = (result['valid_moves'] as List)
                             .map((e) => e.toString())
                             .toList();
                         ref.read(validMovesProvider.notifier).state = moves;
                       } catch (e) {
-                        /* ... xử lý lỗi ... */
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(
+                            context,
+                          ).showSnackBar(SnackBar(content: Text(e.toString())));
+                        }
                       }
                     },
                     child: const Text('Tung Xúc Xắc'),
@@ -111,13 +136,11 @@ class GameScreen extends ConsumerWidget {
 
               const Divider(height: 30),
 
-              // ---- HIỂN THỊ QUÂN CỜ CÓ THỂ TƯƠNG TÁC ----
-              // ---- THAY THẾ LISTVIEW BẰNG BÀN CỜ VISUAL ----
+              // ---- BÀN CỜ VISUAL ----
               Expanded(
                 child: pieces.when(
                   data: (pieceList) {
                     return myPlayerInfo.when(
-                      // Chỉ khi có thông tin màu của người chơi thì mới vẽ bàn cờ
                       data: (playerInfo) {
                         if (playerInfo == null) {
                           return const Center(
@@ -125,8 +148,7 @@ class GameScreen extends ConsumerWidget {
                           );
                         }
                         final myColor = playerInfo['color'];
-
-                        // Map để theo dõi index của các quân cờ trong chuồng của mỗi màu
+                        final myPlayerId = playerInfo['id'];
                         final homeIndices = <String, int>{};
 
                         return LayoutBuilder(
@@ -142,20 +164,19 @@ class GameScreen extends ConsumerWidget {
 
                             return Stack(
                               children: [
-                                // 1. Vẽ nền bàn cờ
+                                // TODO: Đảm bảo bạn có file 'assets/board.png' và đã khai báo trong pubspec.yaml
                                 Positioned.fill(
-                                  child: Image.asset(
-                                    'assets/board.png',
-                                  ), // <-- Thay thế bằng ảnh bàn cờ của bạn
+                                  child: Container(
+                                    color: const Color(0xFFC8E6C9),
+                                  ), // Màu nền thay thế
                                 ),
 
-                                // 2. Vẽ các quân cờ
                                 ...pieceList.map((piece) {
                                   final pieceId = piece['id'].toString();
                                   final pieceColor = piece['color'].toString();
                                   final position = piece['position'] as int;
                                   final isMyPiece =
-                                      piece['player_id'] == myUserId;
+                                      piece['player_id'] == myPlayerId;
                                   final canMove = validMoves.contains(pieceId);
 
                                   int homeIndex = 0;
@@ -170,20 +191,13 @@ class GameScreen extends ConsumerWidget {
                                     homeIndex: homeIndex,
                                   );
 
-                                  // Giảm kích thước quân cờ một chút
                                   final pieceSize = mapper.cellSize * 0.8;
 
                                   return AnimatedPositioned(
                                     duration: const Duration(milliseconds: 400),
                                     curve: Curves.easeInOut,
-                                    left:
-                                        offset.dx -
-                                        (pieceSize / 2) +
-                                        (mapper.cellSize / 2),
-                                    top:
-                                        offset.dy -
-                                        (pieceSize / 2) +
-                                        (mapper.cellSize / 2),
+                                    left: offset.dx,
+                                    top: offset.dy,
                                     width: pieceSize,
                                     height: pieceSize,
                                     child: GestureDetector(
@@ -242,7 +256,6 @@ class GameScreen extends ConsumerWidget {
     );
   }
 
-  // Hàm trợ giúp để chuyển string màu thành đối tượng Color
   Color _getColorFromString(String colorString) {
     switch (colorString) {
       case 'red':

@@ -13,15 +13,20 @@ final gameStateStreamProvider = StreamProvider.autoDispose
           .map((list) => list.isNotEmpty ? list.first : {});
     });
 
-// Lắng nghe tất cả quân cờ trong phòng hiện tại
+// Lắng nghe tất cả quân cờ trong phòng hiện tại từ VIEW 'room_pieces'
 final piecesStreamProvider = StreamProvider.autoDispose
     .family<List<Map<String, dynamic>>, String>((ref, roomId) {
       final client = ref.watch(supabaseClientProvider);
-      // Chúng ta cần join với bảng players để lấy nickname
+
+      // Thay vì stream từ 'pieces' và cố gắng join,
+      // chúng ta stream từ VIEW 'room_pieces' đã được join sẵn.
       return client
-          .from('room_pieces')
-          .stream(primaryKey: ['id'])
-          .eq('player.room_id', roomId) // Lọc theo room_id của người chơi
+          .from('room_pieces') // <-- THAY ĐỔI QUAN TRỌNG
+          .stream(primaryKey: ['id']) // 'id' là khóa chính của quân cờ
+          .eq(
+            'room_id',
+            roomId,
+          ) // <-- Bây giờ có thể lọc trực tiếp trên cột room_id
           .map((list) => list);
     });
 
